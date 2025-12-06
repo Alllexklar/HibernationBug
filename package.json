@@ -1,0 +1,12 @@
+{
+  "name": "hibernation-bug-tests",
+  "version": "1.0.0",
+  "description": "Minimal reproduction tests for Cloudflare DO hibernation bug",
+  "private": true,
+  "scripts": {
+    "test": "./start.sh",
+    "server": "cd raw-cloudflare && npm run dev",
+    "client": "cd client && npm run dev",
+    "install:all": "cd raw-cloudflare && npm install && cd ../client && npm install"
+  }
+}

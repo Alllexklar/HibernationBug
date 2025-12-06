@@ -1,0 +1,20 @@
+name = "raw-cloudflare-test"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[durable_objects]
+bindings = [
+  { name = "RAW_TEST_DO", class_name = "RawTestDO" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RawTestDO"]

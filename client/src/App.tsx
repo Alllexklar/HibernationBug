@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import './App.css'
 
 interface LogEntry {
@@ -16,12 +16,16 @@ interface ServerStatus {
 }
 
 function App() {
-  const [connected, setConnected] = useState(false)
+  // Connection state machine
+  const [actualState, setActualState] = useState<'disconnected' | 'connecting' | 'connected' | 'disconnecting'>('disconnected')
+  const [intendedState, setIntendedState] = useState<'connected' | 'disconnected'>('disconnected')
+  
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [status, setStatus] = useState<ServerStatus | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const heartbeatRef = useRef<number | null>(null)
   const [usePartyKit, setUsePartyKit] = useState(false)
+  const reconcileNeededRef = useRef(false)
 
   const addLog = (type: LogEntry['type'], message: string) => {
     setLogs(prev => [...prev, {
@@ -30,6 +34,75 @@ function App() {
       message
     }])
   }
+
+  const connectWebSocket = () => {
+    // Switch between raw Cloudflare and PartyKit
+    const wsUrl = usePartyKit 
+      ? 'wss://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
+      : 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+    
+    addLog('info', `Connecting to ${usePartyKit ? 'PartyServer' : 'Raw Cloudflare'}: ${wsUrl}...`)
+    
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setActualState('connected')
+      addLog('success', '✅ WebSocket CONNECTED')
+      reconcileNeededRef.current = true
+    }
+
+    ws.onmessage = (event) => {
+      addLog('info', `📨 Received: ${event.data}`)
+      try {
+        const data = JSON.parse(event.data)
+        console.log('Server response:', data)
+      } catch {}
+    }
+
+    ws.onclose = (event) => {
+      setActualState('disconnected')
+      wsRef.current = null
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current)
+        heartbeatRef.current = null
+      }
+      addLog('warning', `❌ WebSocket CLOSED: code=${event.code}, reason="${event.reason}"`)
+      reconcileNeededRef.current = true
+    }
+
+    ws.onerror = (error) => {
+      addLog('error', `❌ WebSocket ERROR: ${error}`)
+    }
+  }
+
+  // Toggle function - updates intended state
+  const toggleConnection = () => {
+    const newIntendedState = intendedState === 'connected' ? 'disconnected' : 'connected'
+    setIntendedState(newIntendedState)
+    addLog('info', `🎯 User wants to be: ${newIntendedState}`)
+    reconcileNeededRef.current = true
+  }
+
+  // Effect to reconcile when needed
+  useEffect(() => {
+    if (!reconcileNeededRef.current) return
+    reconcileNeededRef.current = false
+
+    if (actualState === 'connected' && intendedState === 'disconnected') {
+      // Need to disconnect
+      addLog('info', '🔌 Reconciling: Disconnecting...')
+      setActualState('disconnecting')
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'client-initiated')
+      }
+    } else if (actualState === 'disconnected' && intendedState === 'connected') {
+      // Need to connect
+      addLog('info', '🔌 Reconciling: Connecting...')
+      setActualState('connecting')
+      connectWebSocket()
+    }
+  }, [actualState, intendedState])
 
   useEffect(() => {
     return () => {
@@ -42,53 +115,6 @@ function App() {
     }
   }, [])
 
-  const connect = () => {
-    if (wsRef.current) {
-      addLog('warning', 'Already connected')
-      return
-    }
-
-    // Switch between raw Cloudflare and PartyKit
-    const wsUrl = usePartyKit 
-      ? 'wss://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
-      : 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
-    
-    addLog('info', `Connecting to ${usePartyKit ? 'PartyServer' : 'Raw Cloudflare'}: ${wsUrl}...`)
-    
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      setConnected(true)
-      addLog('success', '✅ WebSocket CONNECTED')
-      
-      // Let browser/server handle ping/pong automatically
-      // No manual heartbeat needed with hibernation
-    }
-
-    ws.onmessage = (event) => {
-      addLog('info', `📨 Received: ${event.data}`)
-      try {
-        const data = JSON.parse(event.data)
-        console.log('Server response:', data)
-      } catch {}
-    }
-
-    ws.onclose = (event) => {
-      setConnected(false)
-      wsRef.current = null
-      if (heartbeatRef.current) {
-        clearInterval(heartbeatRef.current)
-        heartbeatRef.current = null
-      }
-      addLog('warning', `❌ WebSocket CLOSED: code=${event.code}, reason="${event.reason}"`)
-    }
-
-    ws.onerror = (error) => {
-      addLog('error', `❌ WebSocket ERROR: ${error}`)
-    }
-  }
-
   const sendPing = () => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       addLog('error', 'Not connected')
@@ -97,22 +123,7 @@ function App() {
 
     const message = `ping-${Date.now()}`
     wsRef.current.send(message)
-    addLog('info', `📤 Sent: ${message}`)
-  }
-
-  const disconnect = () => {
-    if (!wsRef.current) {
-      addLog('warning', 'Not connected')
-      return
-    }
-
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current)
-      heartbeatRef.current = null
-    }
-    
-    wsRef.current.close(1000, 'client-initiated')
-    addLog('info', '🔌 Disconnect initiated')
+    addLog('info', `� Sent: ${message}`)
   }
 
   const fetchStatus = async () => {
@@ -153,7 +164,7 @@ function App() {
             type="checkbox" 
             checked={usePartyKit} 
             onChange={(e) => setUsePartyKit(e.target.checked)}
-            disabled={connected}
+            disabled={actualState !== 'disconnected'}
           />
           Use PartyKit (unchecked = Raw Cloudflare)
         </label>
@@ -163,23 +174,26 @@ function App() {
       </div>
       
       <div className="status-bar">
-        <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
-          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+        <div className={`connection-status ${actualState === 'connected' ? 'connected' : 'disconnected'}`}>
+          {actualState === 'connected' && '🟢 Connected'}
+          {actualState === 'disconnected' && '🔴 Disconnected'}
+          {actualState === 'connecting' && '🟡 Connecting...'}
+          {actualState === 'disconnecting' && '🟠 Disconnecting...'}
+        </div>
+        <div className="intended-state" style={{ fontSize: '0.9em', opacity: 0.7, marginTop: '4px' }}>
+          Intent: {intendedState === 'connected' ? '→ Connected' : '→ Disconnected'}
         </div>
       </div>
 
       <div className="controls">
-        <button onClick={connect} disabled={connected} className="btn-primary">
-          1. Connect
+        <button onClick={toggleConnection} className={intendedState === 'connected' ? 'btn-warning' : 'btn-primary'}>
+          {intendedState === 'connected' ? 'Disconnect' : 'Connect'}
         </button>
-        <button onClick={sendPing} disabled={!connected} className="btn-secondary">
-          2. Send Ping
-        </button>
-        <button onClick={disconnect} disabled={!connected} className="btn-warning">
-          3. Disconnect
+        <button onClick={sendPing} disabled={actualState !== 'connected'} className="btn-secondary">
+          Send Ping
         </button>
         <button onClick={fetchStatus} className="btn-info">
-          4. Get Status
+          Get Status
         </button>
         <button onClick={clearLogs} className="btn-clear">
           Clear Logs

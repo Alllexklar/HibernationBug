@@ -19,7 +19,41 @@ body {
 h1 {
   text-align: center;
   color: #4fc3f7;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
+}
+
+.backend-toggle {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background: #2d2d2d;
+  border-radius: 8px;
+}
+
+.backend-toggle label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.backend-toggle input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.backend-toggle input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.backend-status {
+  margin-top: 0.5rem;
+  color: #ffa726;
+  font-size: 0.9rem;
 }
 
 .status-bar {

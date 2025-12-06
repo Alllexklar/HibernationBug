@@ -21,6 +21,7 @@ function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const heartbeatRef = useRef<number | null>(null)
+  const [usePartyKit, setUsePartyKit] = useState(false)
 
   const addLog = (type: LogEntry['type'], message: string) => {
     setLogs(prev => [...prev, {
@@ -47,10 +48,12 @@ function App() {
       return
     }
 
-    // Connect to production Cloudflare Worker
-    const wsUrl = 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+    // Switch between raw Cloudflare and PartyKit
+    const wsUrl = usePartyKit 
+      ? 'wss://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
+      : 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
     
-    addLog('info', `Connecting to ${wsUrl}...`)
+    addLog('info', `Connecting to ${usePartyKit ? 'PartyServer' : 'Raw Cloudflare'}: ${wsUrl}...`)
     
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
@@ -115,13 +118,16 @@ function App() {
   const fetchStatus = async () => {
     try {
       addLog('info', 'Fetching status...')
-      const response = await fetch('https://raw-cloudflare-test.cloudflare-manatee010.workers.dev/status')
+      const baseUrl = usePartyKit
+        ? 'https://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
+        : 'https://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+      const response = await fetch(`${baseUrl}/status`)
       const data = await response.json()
       setStatus(data)
       
       // Add detailed log entry
       if (data.mismatch) {
-        addLog('error', `❌ BUG DETECTED: accepted=${data.acceptedCount}, getWebSockets=${data.getWebSocketsCount}`)
+        addLog('error', `❌ BUG DETECTED: accepted=${data.acceptedCount}, getWebSockets=${data.getWebSocketsCount || data.getConnectionsCount}`)
       } else {
         addLog('success', `✅ WORKING: Both counts match at ${data.acceptedCount}`)
       }
@@ -139,7 +145,22 @@ function App() {
 
   return (
     <div className="app">
-      <h1>🔬 Raw Cloudflare DO Hibernation Test</h1>
+      <h1>🔬 Hibernation API Test</h1>
+      
+      <div className="backend-toggle">
+        <label>
+          <input 
+            type="checkbox" 
+            checked={usePartyKit} 
+            onChange={(e) => setUsePartyKit(e.target.checked)}
+            disabled={connected}
+          />
+          Use PartyKit (unchecked = Raw Cloudflare)
+        </label>
+        <div className="backend-status">
+          Currently testing: <strong>{usePartyKit ? 'PartyKit Wrapper' : 'Raw Cloudflare'}</strong>
+        </div>
+      </div>
       
       <div className="status-bar">
         <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>

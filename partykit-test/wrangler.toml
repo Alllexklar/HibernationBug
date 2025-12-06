@@ -1,0 +1,20 @@
+name = "partykit-test"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[durable_objects]
+bindings = [
+  { name = "PARTYKIT_TEST_PARTY", class_name = "PartyKitTestServer" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PartyKitTestServer"]

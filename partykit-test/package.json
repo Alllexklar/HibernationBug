@@ -8,9 +8,12 @@
     "deploy": "partykit deploy"
   },
   "dependencies": {
+    "lib0": "^0.2.114",
     "partykit": "^0.0.111",
     "partyserver": "^0.0.75",
-    "partysocket": "^1.0.2"
+    "partysocket": "^1.0.2",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.27"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251205.0",

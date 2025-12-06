@@ -5,11 +5,13 @@
 
 import { routePartykitRequest } from "partyserver";
 import { PartyKitTestServer } from './server';
+import { YjsPartyServer } from './yjs-server';
 
-export { PartyKitTestServer };
+export { PartyKitTestServer, YjsPartyServer };
 
 interface Env {
-  PartyKitTestServer: DurableObjectNamespace<PartyKitTestServer>;
+  PARTYKIT_TEST_PARTY: DurableObjectNamespace<PartyKitTestServer>;
+  YJS_PARTY: DurableObjectNamespace<YjsPartyServer>;
   [key: string]: unknown;
 }
 

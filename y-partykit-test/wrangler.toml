@@ -1,4 +1,4 @@
-name = "partykit-test"
+name = "y-partykit-test"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
@@ -12,14 +12,9 @@ invocation_logs = true
 
 [durable_objects]
 bindings = [
-  { name = "PARTYKIT_TEST_PARTY", class_name = "PartyKitTestServer" },
-  { name = "YJS_PARTY", class_name = "YjsPartyServer" }
+  { name = "YPartyKitTestServer", class_name = "YPartyKitTestServer" }
 ]
 
 [[migrations]]
 tag = "v1"
-new_classes = ["PartyKitTestServer"]
-
-[[migrations]]
-tag = "v2"
-new_classes = ["YjsPartyServer"]
+new_classes = ["YPartyKitTestServer"]

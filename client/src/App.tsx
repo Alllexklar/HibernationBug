@@ -1,5 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import './App.css'
+import * as Y from 'yjs'
+import YPartyKitProvider from 'y-partykit/provider'
+import { YjsPartyProvider } from './YjsPartyProvider'
+import { useEditor, EditorContent } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import Collaboration from '@tiptap/extension-collaboration'
 
 interface LogEntry {
   timestamp: string
@@ -24,8 +30,31 @@ function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const heartbeatRef = useRef<number | null>(null)
-  const [usePartyKit, setUsePartyKit] = useState(false)
+  const [backend, setBackend] = useState<'raw' | 'partykit' | 'yjs' | 'custom-yjs'>('custom-yjs')
   const reconcileNeededRef = useRef(false)
+  const yjsDocRef = useRef<Y.Doc | null>(null)
+  const yjsFragRef = useRef<Y.XmlFragment | null>(null)
+  const providerRef = useRef<YPartyKitProvider | null>(null)
+  const customProviderRef = useRef<YjsPartyProvider | null>(null)
+  const [fragReady, setFragReady] = useState(false)
+
+  // Tiptap editor with Yjs collaboration - MUST use fragment like MindGame does
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      ...(fragReady && yjsFragRef.current ? [Collaboration.configure({
+        fragment: yjsFragRef.current,  // Pass fragment, not document
+      })] : []),
+    ],
+    content: '<p>Connecting to Y-PartyServer...</p>',
+    onUpdate: ({ editor }) => {
+      console.log('[Tiptap] Content updated:', {
+        html: editor.getHTML(),
+        textLength: editor.getText().length,
+        timestamp: new Date().toISOString()
+      })
+    }
+  }, [fragReady])  // Recreate editor when fragment becomes ready
 
   const addLog = (type: LogEntry['type'], message: string) => {
     setLogs(prev => [...prev, {
@@ -36,16 +65,157 @@ function App() {
   }
 
   const connectWebSocket = () => {
-    // Switch between raw Cloudflare and PartyKit
-    const wsUrl = usePartyKit 
-      ? 'wss://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
-      : 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+    // Switch between backends
+    let wsUrl: string
+    let backendName: string
     
-    addLog('info', `Connecting to ${usePartyKit ? 'PartyServer' : 'Raw Cloudflare'}: ${wsUrl}...`)
+    switch (backend) {
+      case 'raw':
+        wsUrl = 'wss://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+        backendName = 'Raw Cloudflare'
+        break
+      case 'partykit':
+        wsUrl = 'wss://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
+        backendName = 'PartyServer'
+        break
+      case 'yjs':
+        wsUrl = 'wss://y-partykit-test.cloudflare-manatee010.workers.dev/parties/y-party-kit-test-server/test-room'
+        backendName = 'Y-PartyServer (Yjs)'
+        break
+      case 'custom-yjs':
+        wsUrl = 'wss://partykit-test.cloudflare-manatee010.workers.dev'
+        backendName = 'Custom Yjs PartyServer (Hibernation Compatible)'
+        break
+    }
     
+    addLog('info', `Connecting to ${backendName}: ${wsUrl}...`)
+    
+    // For custom-yjs, use our hibernation-compatible provider
+    if (backend === 'custom-yjs') {
+      const doc = new Y.Doc()
+      yjsDocRef.current = doc
+      
+      const frag = doc.getXmlFragment('prosemirror')
+      yjsFragRef.current = frag
+      setFragReady(true)
+      
+      const provider = new YjsPartyProvider(wsUrl, 'test-room', doc)
+      customProviderRef.current = provider
+      
+      provider.on('status', (event: { status: string }) => {
+        console.log('[CustomYjs] Status:', event.status)
+        addLog('info', `CustomYjs status: ${event.status}`)
+        setActualState(event.status === 'connected' ? 'connected' : 'disconnected')
+      })
+      
+      provider.on('sync', (isSynced: boolean) => {
+        console.log('[CustomYjs] Synced:', isSynced)
+        addLog('success', `CustomYjs synced: ${isSynced}`)
+      })
+      
+      provider.on('custom', (msg: any) => {
+        console.log('[CustomYjs] Custom message:', msg)
+        addLog('info', `CustomYjs custom: ${JSON.stringify(msg)}`)
+      })
+      
+      addLog('success', 'Custom Yjs provider created')
+      return
+    }
+    
+    // For Y-PartyServer, use YPartyKitProvider
+    if (backend === 'yjs') {
+      const doc = new Y.Doc()
+      yjsDocRef.current = doc
+      
+      // Get XmlFragment like MindGame does
+      const frag = doc.getXmlFragment('prosemirror')
+      yjsFragRef.current = frag
+      setFragReady(true)  // Trigger editor recreation with Collaboration extension
+      
+      // Log doc updates
+      doc.on('update', (update: Uint8Array, origin: any) => {
+        console.log('[YJS-CLIENT] Doc update:', {
+          updateSize: update.length,
+          origin: origin,
+          docSize: Y.encodeStateAsUpdate(doc).length,
+          timestamp: new Date().toISOString()
+        })
+        addLog('info', `YJS update: ${update.length} bytes from ${origin || 'local'}`)
+      })
+      
+      doc.on('updateV2', (update: Uint8Array, origin: any) => {
+        console.log('[YJS-CLIENT] Doc updateV2:', {
+          updateSize: update.length,
+          origin: origin,
+          timestamp: new Date().toISOString()
+        })
+      })
+      
+      // YPartyKitProvider connects to Y-PartyServer (not regular y-websocket!)
+      const provider = new YPartyKitProvider(
+        'y-partykit-test.cloudflare-manatee010.workers.dev',
+        'test-room',
+        doc,
+        {
+          party: 'y-party-kit-test-server' // CRITICAL: Must match our server name in wrangler.toml!
+        }
+      )
+      providerRef.current = provider
+      
+      // BLOCK AWARENESS HEARTBEATS - only allow actual Yjs sync messages
+      if (provider.awareness) {
+        // Stop awareness from sending periodic updates
+        provider.awareness.setLocalState(null)
+        
+        // Block any future awareness updates
+        provider.awareness.setLocalState = () => {
+          console.log('[YPartyKit] Awareness update BLOCKED')
+          // Do nothing - no awareness updates sent
+        }
+        console.log('[YPartyKit] Awareness completely BLOCKED - no heartbeats will be sent')
+      }
+      
+      provider.on('status', (event: { status: string }) => {
+        console.log('[YPartyKit] Status change:', event.status)
+        addLog('info', `YPartyKit status: ${event.status}`)
+        setActualState(event.status === 'connected' ? 'connected' : 'disconnected')
+      })
+      
+      provider.on('sync', (isSynced: boolean) => {
+        console.log('[YPartyKit] Sync event:', isSynced)
+        addLog('success', `YPartyKit synced: ${isSynced}`)
+      })
+      
+      // Access internal ws to log raw messages
+      const ws = (provider as any).ws
+      if (ws) {
+        const originalSend = ws.send.bind(ws)
+        ws.send = (data: any) => {
+          console.log('[YPartyKit-WS] Sending:', {
+            type: data instanceof Uint8Array ? 'Uint8Array' : typeof data,
+            size: data.length || data.byteLength || 0,
+            timestamp: new Date().toISOString()
+          })
+          return originalSend(data)
+        }
+        
+        ws.addEventListener('message', (event: MessageEvent) => {
+          console.log('[YPartyKit-WS] Received:', {
+            type: event.data instanceof Blob ? 'Blob' : typeof event.data,
+            size: event.data.size || event.data.length || event.data.byteLength || 0,
+            timestamp: new Date().toISOString()
+          })
+        })
+      }
+      
+      addLog('success', 'YPartyKit provider created with document and debug logging')
+      return
+    }
+
+    // For non-Yjs backends, manual WebSocket
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
-
+    
     ws.onopen = () => {
       setActualState('connected')
       addLog('success', '✅ WebSocket CONNECTED')
@@ -53,6 +223,7 @@ function App() {
     }
 
     ws.onmessage = (event) => {
+      // For non-Yjs backends, handle text messages
       addLog('info', `📨 Received: ${event.data}`)
       try {
         const data = JSON.parse(event.data)
@@ -129,9 +300,23 @@ function App() {
   const fetchStatus = async () => {
     try {
       addLog('info', 'Fetching status...')
-      const baseUrl = usePartyKit
-        ? 'https://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
-        : 'https://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+      
+      let baseUrl: string
+      switch (backend) {
+        case 'raw':
+          baseUrl = 'https://raw-cloudflare-test.cloudflare-manatee010.workers.dev'
+          break
+        case 'partykit':
+          baseUrl = 'https://partykit-test.cloudflare-manatee010.workers.dev/parties/partykit-test-party/test-room'
+          break
+        case 'yjs':
+          baseUrl = 'https://y-partykit-test.cloudflare-manatee010.workers.dev/parties/y-party-kit-test-server/test-room'
+          break
+        case 'custom-yjs':
+          baseUrl = 'https://partykit-test.cloudflare-manatee010.workers.dev/parties/yjs-party/test-room'
+          break
+      }
+      
       const response = await fetch(`${baseUrl}/status`)
       const data = await response.json()
       setStatus(data)
@@ -159,17 +344,60 @@ function App() {
       <h1>🔬 Hibernation API Test</h1>
       
       <div className="backend-toggle">
-        <label>
+        <div style={{ marginBottom: '10px' }}>
+          <strong>Select Backend:</strong>
+        </div>
+        <label style={{ display: 'block', marginBottom: '5px' }}>
           <input 
-            type="checkbox" 
-            checked={usePartyKit} 
-            onChange={(e) => setUsePartyKit(e.target.checked)}
+            type="radio" 
+            name="backend"
+            value="raw"
+            checked={backend === 'raw'} 
+            onChange={() => setBackend('raw')}
             disabled={actualState !== 'disconnected'}
           />
-          Use PartyKit (unchecked = Raw Cloudflare)
+          {' '}Raw Cloudflare DO
+        </label>
+        <label style={{ display: 'block', marginBottom: '5px' }}>
+          <input 
+            type="radio" 
+            name="backend"
+            value="partykit"
+            checked={backend === 'partykit'} 
+            onChange={() => setBackend('partykit')}
+            disabled={actualState !== 'disconnected'}
+          />
+          {' '}PartyServer (no Yjs)
+        </label>
+        <label style={{ display: 'block', marginBottom: '10px' }}>
+          <input 
+            type="radio" 
+            name="backend"
+            value="yjs"
+            checked={backend === 'yjs'} 
+            onChange={() => setBackend('yjs')}
+            disabled={actualState !== 'disconnected'}
+          />
+          {' '}Y-PartyServer (breaks hibernation ❌)
+        </label>
+        <label style={{ display: 'block', marginBottom: '10px' }}>
+          <input 
+            type="radio" 
+            name="backend"
+            value="custom-yjs"
+            checked={backend === 'custom-yjs'} 
+            onChange={() => setBackend('custom-yjs')}
+            disabled={actualState !== 'disconnected'}
+          />
+          {' '}Custom Yjs (hibernation compatible ✅)
         </label>
         <div className="backend-status">
-          Currently testing: <strong>{usePartyKit ? 'PartyKit Wrapper' : 'Raw Cloudflare'}</strong>
+          Currently testing: <strong>
+            {backend === 'raw' && 'Raw Cloudflare'}
+            {backend === 'partykit' && 'PartyServer'}
+            {backend === 'yjs' && 'Y-PartyServer (Yjs)'}
+            {backend === 'custom-yjs' && 'Custom Yjs (Hibernation Compatible)'}
+          </strong>
         </div>
       </div>
       
@@ -199,6 +427,28 @@ function App() {
           Clear Logs
         </button>
       </div>
+
+      {(backend === 'yjs' || backend === 'custom-yjs') && (providerRef.current || customProviderRef.current) && (
+        <div className="yjs-test-area" style={{ margin: '20px 0', padding: '15px', border: '2px solid #4CAF50', borderRadius: '8px', backgroundColor: '#f9f9f9' }}>
+          <h3 style={{ marginTop: 0, color: '#4CAF50' }}>🔄 Tiptap with Yjs Collaboration</h3>
+          <div style={{
+            border: '1px solid #ddd',
+            borderRadius: '4px',
+            padding: '10px',
+            minHeight: '120px',
+            backgroundColor: 'white'
+          }}>
+            {editor ? (
+              <EditorContent editor={editor} />
+            ) : (
+              <p style={{ color: '#999' }}>Loading editor...</p>
+            )}
+          </div>
+          <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
+            💡 <strong>Tip:</strong> Open multiple tabs/browsers and type to see real-time CRDT sync!
+          </div>
+        </div>
+      )}
 
       {status && (
         <div className={`status-card ${status.mismatch ? 'error' : 'success'}`}>

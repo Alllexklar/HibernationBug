@@ -14,11 +14,15 @@ interface LogEntry {
 }
 
 interface ServerStatus {
-  acceptedCount: number
-  getWebSocketsCount: number
-  mismatch: boolean
-  verdict: string
+  acceptedCount?: number
+  getWebSocketsCount?: number
+  mismatch?: boolean
+  verdict?: string
   timestamp: string
+  // Custom Yjs fields
+  connections?: number
+  docSize?: number
+  awarenessStates?: number
 }
 
 function App() {
@@ -37,6 +41,13 @@ function App() {
   const providerRef = useRef<YPartyKitProvider | null>(null)
   const customProviderRef = useRef<YjsPartyProvider | null>(null)
   const [fragReady, setFragReady] = useState(false)
+  const [awarenessStates, setAwarenessStates] = useState<Map<number, any>>(new Map())
+  const [testMessage, setTestMessage] = useState('')
+  const [awarenessEnabled, setAwarenessEnabled] = useState(false)
+  const awarenessEnabledRef = useRef(false)  // Use ref so event handler can access current value
+  const [connectionCount, setConnectionCount] = useState<number | null>(null)
+  const [currentMode, setCurrentMode] = useState<'solo' | 'multi'>('solo')
+  const [connectedUsers, setConnectedUsers] = useState<Array<{ id: string; name: string; color: string; profile_picture_url: string }>>([])
 
   // Tiptap editor with Yjs collaboration - MUST use fragment like MindGame does
   const editor = useEditor({
@@ -56,15 +67,15 @@ function App() {
     }
   }, [fragReady])  // Recreate editor when fragment becomes ready
 
-  const addLog = (type: LogEntry['type'], message: string) => {
+  const addLog = useCallback((type: LogEntry['type'], message: string) => {
     setLogs(prev => [...prev, {
       timestamp: new Date().toISOString(),
       type,
       message
     }])
-  }
+  }, [])
 
-  const connectWebSocket = () => {
+  const connectWebSocket = useCallback(() => {
     // Switch between backends
     let wsUrl: string
     let backendName: string
@@ -102,20 +113,85 @@ function App() {
       const provider = new YjsPartyProvider(wsUrl, 'test-room', doc)
       customProviderRef.current = provider
       
-      provider.on('status', (event: { status: string }) => {
+      // DON'T set initial awareness - we want to test hibernation!
+      // User will manually send awareness via button
+      
+      // Track awareness changes (but only log if awareness is enabled)
+      provider.awareness.on('change', () => {
+        const states = new Map(provider.awareness.getStates())
+        setAwarenessStates(states)
+        // Only log awareness changes if user has explicitly enabled it
+        if (awarenessEnabledRef.current && states.size > 0) {
+          addLog('info', `👥 Awareness changed: ${states.size} user(s) active`)
+        }
+      })
+      
+      provider.on('status', async (event: { status: string }) => {
         console.log('[CustomYjs] Status:', event.status)
-        addLog('info', `CustomYjs status: ${event.status}`)
+        addLog('info', `🔌 CustomYjs status: ${event.status}`)
         setActualState(event.status === 'connected' ? 'connected' : 'disconnected')
+        
+        // Fetch status when connected to show connection count
+        if (event.status === 'connected') {
+          try {
+            const response = await fetch('https://partykit-test.cloudflare-manatee010.workers.dev/parties/yjs-party/test-room/status')
+            const data = await response.json()
+            addLog('success', `📊 Connected! ${data.connections} client(s), Doc: ${data.docSize}B, Awareness: ${data.awarenessStates}`)
+          } catch (e) {
+            // Silent fail
+          }
+        }
       })
       
       provider.on('sync', (isSynced: boolean) => {
         console.log('[CustomYjs] Synced:', isSynced)
-        addLog('success', `CustomYjs synced: ${isSynced}`)
+        addLog('success', `✅ CustomYjs synced: ${isSynced}`)
       })
       
       provider.on('custom', (msg: any) => {
-        console.log('[CustomYjs] Custom message:', msg)
-        addLog('info', `CustomYjs custom: ${JSON.stringify(msg)}`)
+        console.log('[CustomYjs] Custom message received:', msg)
+        if (msg.type === 'connection-count') {
+          const data = msg.data;
+          console.log('[CustomYjs] Status update:', data)
+          
+          const newConnectionCount = data.connectionCount || data.connections || 0;
+          const newMode = data.mode || 'solo';
+          const users = data.users || [];
+          
+          setConnectionCount(newConnectionCount)
+          setConnectedUsers(users)  // Store all connected users
+          addLog('info', `📊 ${JSON.stringify(data)}`)
+          
+          // React to mode changes for awareness
+          setCurrentMode(prevMode => {
+            if (prevMode !== newMode) {
+              console.log(`[CustomYjs] Mode change: ${prevMode} → ${newMode}`);
+              
+              // Only auto-enable awareness if user had it on and mode changed to multi
+              if (newMode === 'multi' && awarenessEnabledRef.current) {
+                addLog('info', `🔄 Mode changed to multi - awareness already enabled`);
+              } else if (newMode === 'solo' && awarenessEnabledRef.current) {
+                // User had awareness on, but we're back to solo
+                addLog('info', `🔄 Mode changed to solo - keeping awareness state`);
+              }
+            }
+            return newMode;
+          });
+        } else {
+          addLog('info', `CustomYjs custom: ${JSON.stringify(msg)}`)
+        }
+      })
+      
+      // Handle custom awareness events (server broadcasts awareness changes)
+      provider.on('awareness', ({ clientId, state }: any) => {
+        console.log('[CustomYjs] Awareness update:', clientId, state);
+        if (awarenessEnabledRef.current) {
+          if (state === null) {
+            addLog('info', `👥 User ${clientId} left`);
+          } else {
+            addLog('info', `👥 Awareness from ${clientId}: ${JSON.stringify(state)}`);
+          }
+        }
       })
       
       addLog('success', 'Custom Yjs provider created')
@@ -245,7 +321,7 @@ function App() {
     ws.onerror = (error) => {
       addLog('error', `❌ WebSocket ERROR: ${error}`)
     }
-  }
+  }, [backend, addLog])
 
   // Toggle function - updates intended state
   const toggleConnection = () => {
@@ -264,7 +340,18 @@ function App() {
       // Need to disconnect
       addLog('info', '🔌 Reconciling: Disconnecting...')
       setActualState('disconnecting')
-      if (wsRef.current) {
+      
+      // Handle different backend types
+      if (backend === 'custom-yjs' && customProviderRef.current) {
+        customProviderRef.current.destroy()
+        customProviderRef.current = null
+        yjsDocRef.current = null
+        yjsFragRef.current = null
+        setFragReady(false)
+        // Immediately set to disconnected since we destroyed the provider
+        setActualState('disconnected')
+        addLog('success', '✅ Disconnected')
+      } else if (wsRef.current) {
         wsRef.current.close(1000, 'client-initiated')
       }
     } else if (actualState === 'disconnected' && intendedState === 'connected') {
@@ -273,7 +360,7 @@ function App() {
       setActualState('connecting')
       connectWebSocket()
     }
-  }, [actualState, intendedState])
+  }, [actualState, intendedState, connectWebSocket])
 
   useEffect(() => {
     return () => {
@@ -287,15 +374,75 @@ function App() {
   }, [])
 
   const sendPing = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      addLog('error', 'Not connected')
-      return
+    // For custom-yjs, use custom message protocol
+    if (backend === 'custom-yjs' && customProviderRef.current) {
+      customProviderRef.current.sendCustomMessage({ type: 'ping' });
+      addLog('info', '🏓 Sent ping via custom message');
+      return;
     }
 
-    const message = `ping-${Date.now()}`
-    wsRef.current.send(message)
-    addLog('info', `� Sent: ${message}`)
-  }
+    // For other backends, use raw WebSocket
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      addLog('error', 'Not connected');
+      return;
+    }
+
+    const message = `ping-${Date.now()}`;
+    wsRef.current.send(message);
+    addLog('info', `📤 Sent: ${message}`);
+  };
+
+  const sendTestMessage = () => {
+    if (backend === 'custom-yjs' && customProviderRef.current) {
+      customProviderRef.current.sendCustomMessage({ 
+        type: 'config' as const, 
+        data: { message: testMessage, timestamp: new Date().toISOString() }
+      });
+      addLog('info', `📨 Sent custom message: ${testMessage}`);
+      setTestMessage('');
+    }
+  };
+
+  const sendAwareness = () => {
+    if (backend === 'custom-yjs' && customProviderRef.current) {
+      // Find our user data from connectedUsers (server assigns this on connect)
+      // For now, just send dummy cursor/selection data since the user object comes from server
+      const awarenessData = {
+        cursor: {
+          line: Math.floor(Math.random() * 10),
+          col: Math.floor(Math.random() * 50)
+        },
+        selection: {
+          anchor: Math.floor(Math.random() * 100),
+          head: Math.floor(Math.random() * 100)
+        },
+        timestamp: new Date().toISOString()
+      };
+      
+      // Manually send awareness update (user data comes from server via connection-count)
+      customProviderRef.current.sendAwarenessUpdate(awarenessData);
+      addLog('success', `👋 Sent awareness: ${JSON.stringify(awarenessData)}`);
+      setAwarenessEnabled(true);
+      awarenessEnabledRef.current = true;
+    }
+  };
+
+  const clearAwareness = () => {
+    if (backend === 'custom-yjs' && customProviderRef.current) {
+      customProviderRef.current.clearAwareness();
+      addLog('info', '🚫 Cleared awareness state');
+      setAwarenessEnabled(false);
+      awarenessEnabledRef.current = false;
+    }
+  };
+
+  const toggleAwareness = () => {
+    if (awarenessEnabled) {
+      clearAwareness();
+    } else {
+      sendAwareness();
+    }
+  };
 
   const fetchStatus = async () => {
     try {
@@ -321,14 +468,17 @@ function App() {
       const data = await response.json()
       setStatus(data)
       
-      // Add detailed log entry
-      if (data.mismatch) {
-        addLog('error', `❌ BUG DETECTED: accepted=${data.acceptedCount}, getWebSockets=${data.getWebSocketsCount || data.getConnectionsCount}`)
+      // Add detailed log entry based on backend
+      if (backend === 'custom-yjs') {
+        addLog('success', `📊 Connections: ${data.connections}, Doc: ${data.docSize}B, Awareness: ${data.awarenessStates}`)
       } else {
-        addLog('success', `✅ WORKING: Both counts match at ${data.acceptedCount}`)
+        if (data.mismatch) {
+          addLog('error', `❌ BUG DETECTED: accepted=${data.acceptedCount}, getWebSockets=${data.getWebSocketsCount || data.getConnectionsCount}`)
+        } else {
+          addLog('success', `✅ WORKING: Both counts match at ${data.acceptedCount}`)
+        }
+        addLog('success', `📊 Verdict: ${data.verdict}`)
       }
-      
-      addLog('success', `📊 Verdict: ${data.verdict}`)
     } catch (error) {
       addLog('error', `Failed to fetch status: ${error}`)
     }
@@ -447,6 +597,129 @@ function App() {
           <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
             💡 <strong>Tip:</strong> Open multiple tabs/browsers and type to see real-time CRDT sync!
           </div>
+          
+          {backend === 'custom-yjs' && customProviderRef.current && (
+            <div style={{ marginTop: '15px', padding: '15px', border: '1px solid #ddd', borderRadius: '4px', backgroundColor: 'white' }}>
+              <h4 style={{ marginTop: 0, marginBottom: '10px' }}>📊 Yjs + PartyServer Controls</h4>
+              
+              {awarenessEnabled && (
+                <div style={{ marginBottom: '15px' }}>
+                  <strong>Awareness States (Connected Users):</strong>
+                  <div style={{ marginTop: '5px', padding: '10px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
+                    {awarenessStates.size === 0 ? (
+                      <span style={{ color: '#999' }}>No users detected yet...</span>
+                    ) : (
+                      Array.from(awarenessStates.entries()).map(([clientId, state]) => (
+                        <div key={clientId} style={{ marginBottom: '5px' }}>
+                          <span style={{ 
+                            display: 'inline-block', 
+                            width: '12px', 
+                            height: '12px', 
+                            borderRadius: '50%', 
+                            backgroundColor: state?.color || '#999',
+                            marginRight: '8px'
+                          }}></span>
+                          <strong>{state?.user || `Client ${clientId}`}</strong>
+                          {clientId === yjsDocRef.current?.clientID && ' (You)'}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+              
+              <div style={{ marginBottom: '15px' }}>
+                <strong>Send Custom Message:</strong>
+                <div style={{ display: 'flex', gap: '10px', marginTop: '5px' }}>
+                  <input 
+                    type="text" 
+                    value={testMessage}
+                    onChange={(e) => setTestMessage(e.target.value)}
+                    placeholder="Enter message..."
+                    style={{ flex: 1, padding: '8px', borderRadius: '4px', border: '1px solid #ddd' }}
+                    onKeyPress={(e) => e.key === 'Enter' && sendTestMessage()}
+                  />
+                  <button onClick={sendTestMessage} disabled={!testMessage} className="btn-secondary">
+                    Send Config
+                  </button>
+                </div>
+              </div>
+              
+              {connectionCount !== null && (
+                <div style={{ marginBottom: '15px', padding: '10px', backgroundColor: '#e8f5e9', borderRadius: '4px' }}>
+                  <div style={{ marginBottom: '10px' }}>
+                    <strong>📊 Active Connections: {connectionCount}</strong>
+                    <span style={{ marginLeft: '10px', padding: '2px 8px', borderRadius: '4px', backgroundColor: currentMode === 'solo' ? '#90caf9' : '#ffb74d', color: 'white', fontSize: '12px', fontWeight: 'bold' }}>
+                      {currentMode.toUpperCase()}
+                    </span>
+                  </div>
+                  
+                  {connectedUsers.length > 0 && (
+                    <div style={{ marginTop: '10px', padding: '10px', backgroundColor: 'white', borderRadius: '4px' }}>
+                      <strong>👥 Connected Users:</strong>
+                      <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {connectedUsers.map(user => (
+                          <div key={user.id} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <img 
+                              src={user.profile_picture_url} 
+                              alt={user.name}
+                              style={{ width: '32px', height: '32px', borderRadius: '50%', border: `2px solid ${user.color}` }}
+                            />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 'bold' }}>{user.name}</div>
+                              <div style={{ fontSize: '11px', color: '#666' }}>{user.id.slice(0, 8)}...</div>
+                            </div>
+                            <div 
+                              style={{ 
+                                width: '20px', 
+                                height: '20px', 
+                                borderRadius: '50%', 
+                                backgroundColor: user.color,
+                                border: '2px solid white',
+                                boxShadow: '0 0 0 1px #ddd'
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <button onClick={toggleAwareness} className="btn-secondary">
+                  {awarenessEnabled ? '🟢 Awareness ON' : '⚫ Awareness OFF'}
+                </button>
+                <button 
+                  onClick={sendAwareness} 
+                  className="btn-primary"
+                  disabled={!awarenessEnabled}
+                  style={{ opacity: awarenessEnabled ? 1 : 0.5 }}
+                >
+                  👋 Send Awareness Ping
+                </button>
+                <button onClick={sendPing} className="btn-secondary">
+                  🏓 Send Ping
+                </button>
+                <button onClick={fetchStatus} className="btn-info">
+                  📊 Get Server Status
+                </button>
+              </div>
+              
+              <div style={{ marginTop: '15px', padding: '12px', backgroundColor: '#fff3cd', borderRadius: '4px', fontSize: '13px', lineHeight: '1.6' }}>
+                <strong>🧪 Hibernation + Awareness Test Guide:</strong>
+                <ol style={{ margin: '8px 0 0 0', paddingLeft: '20px' }}>
+                  <li><strong>Test Awareness Works:</strong> Toggle ON → Click "Send Awareness Ping" → Open 2nd tab → Send ping → Verify logs show both users</li>
+                  <li><strong>Test Hibernation Still Works:</strong> Send awareness ping once → Wait 60s idle → Type in editor → Check console for 🔥 hibernation wake-up</li>
+                  <li><strong>Test Awareness Wakes Hibernated DO:</strong> Don't send awareness → Wait 60s → Click "Send Awareness Ping" → Check console for hibernation wake</li>
+                </ol>
+                <div style={{ marginTop: '8px', fontSize: '12px', color: '#856404' }}>
+                  ✅ <strong>Success:</strong> If awareness works AND hibernation still happens after 60s idle, we've proven custom awareness is hibernation-safe!
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -454,18 +727,37 @@ function App() {
         <div className={`status-card ${status.mismatch ? 'error' : 'success'}`}>
           <h3>Server Status</h3>
           <div className="status-grid">
-            <div>
-              <strong>Accepted Count:</strong> {status.acceptedCount}
-            </div>
-            <div>
-              <strong>getWebSockets() Count:</strong> {status.getWebSocketsCount}
-            </div>
-            <div>
-              <strong>Mismatch:</strong> {status.mismatch ? '❌ YES' : '✅ NO'}
-            </div>
-            <div className="verdict">
-              <strong>Verdict:</strong> {status.verdict}
-            </div>
+            {backend === 'custom-yjs' ? (
+              <>
+                <div>
+                  <strong>Connections:</strong> {status.connections}
+                </div>
+                <div>
+                  <strong>Doc Size:</strong> {status.docSize} bytes
+                </div>
+                <div>
+                  <strong>Awareness States:</strong> {status.awarenessStates}
+                </div>
+                <div>
+                  <strong>Timestamp:</strong> {status.timestamp}
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <strong>Accepted Count:</strong> {status.acceptedCount}
+                </div>
+                <div>
+                  <strong>getWebSockets() Count:</strong> {status.getWebSocketsCount}
+                </div>
+                <div>
+                  <strong>Mismatch:</strong> {status.mismatch ? '❌ YES' : '✅ NO'}
+                </div>
+                <div className="verdict">
+                  <strong>Verdict:</strong> {status.verdict}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

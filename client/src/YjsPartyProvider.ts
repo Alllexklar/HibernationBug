@@ -14,7 +14,7 @@ const MESSAGE_AWARENESS = 1;
 const MESSAGE_CUSTOM = 2;
 
 interface CustomMessage {
-  type: 'config' | 'mode' | 'ping' | 'pong';
+  type: 'config' | 'mode' | 'ping' | 'pong' | 'connection-count';
   data?: any;
   timestamp?: string;
 }
@@ -22,10 +22,11 @@ interface CustomMessage {
 export class YjsPartyProvider {
   private ws: WebSocket | null = null;
   private doc: Y.Doc;
-  private awareness: awarenessProtocol.Awareness;
+  public awareness: awarenessProtocol.Awareness;  // Make public so client can access it
   private url: string;
   private synced = false;
   private listeners: Map<string, Set<Function>> = new Map();
+  private destroyed = false;  // Track if provider was explicitly destroyed
 
   constructor(url: string, roomName: string, doc: Y.Doc) {
     this.doc = doc;
@@ -43,20 +44,9 @@ export class YjsPartyProvider {
       }
     });
 
-    // Listen to awareness changes and send to server
-    this.awareness.on('update', ({ added, updated, removed }: any) => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        const changed = added.concat(updated).concat(removed);
-        console.log('[YjsPartyProvider] Sending awareness update:', changed);
-        const encoder = encoding.createEncoder();
-        encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
-        encoding.writeVarUint8Array(
-          encoder,
-          awarenessProtocol.encodeAwarenessUpdate(this.awareness, changed)
-        );
-        this.ws.send(encoding.toUint8Array(encoder));
-      }
-    });
+    // DON'T listen to awareness changes automatically!
+    // Client will manually send awareness updates via sendAwarenessUpdate()
+    // This gives full control - no automatic heartbeats, no hidden traffic
 
     this.connect();
   }
@@ -77,17 +67,7 @@ export class YjsPartyProvider {
       this.ws!.send(encoding.toUint8Array(encoder));
       console.log('[YjsPartyProvider] Sent initial sync');
 
-      // Send awareness state if set
-      if (this.awareness.getLocalState() !== null) {
-        const awarenessEncoder = encoding.createEncoder();
-        encoding.writeVarUint(awarenessEncoder, MESSAGE_AWARENESS);
-        encoding.writeVarUint8Array(
-          awarenessEncoder,
-          awarenessProtocol.encodeAwarenessUpdate(this.awareness, [this.doc.clientID])
-        );
-        this.ws!.send(encoding.toUint8Array(awarenessEncoder));
-        console.log('[YjsPartyProvider] Sent awareness state');
-      }
+      // DON'T send awareness on connect - client will send manually if needed
     };
 
     this.ws.onmessage = (event) => {
@@ -116,21 +96,27 @@ export class YjsPartyProvider {
           break;
 
         case MESSAGE_AWARENESS:
-          awarenessProtocol.applyAwarenessUpdate(
-            this.awareness,
-            decoding.readVarUint8Array(decoder),
-            this
-          );
+          // Receive custom JSON-based awareness (not y-protocols binary)
+          const awarenessData = decoding.readVarString(decoder);
+          console.log('[YjsPartyProvider] Received awareness data:', awarenessData);
+          try {
+            const { clientId, state } = JSON.parse(awarenessData);
+            console.log('[YjsPartyProvider] Parsed awareness:', clientId, state);
+            this.emit('awareness', { clientId, state });
+          } catch (e) {
+            console.error('[YjsPartyProvider] Failed to parse awareness:', e);
+          }
           break;
 
         case MESSAGE_CUSTOM:
           const customData = decoding.readVarString(decoder);
+          console.log('[YjsPartyProvider] Raw custom message data:', customData);
           try {
             const msg: CustomMessage = JSON.parse(customData);
-            console.log('[YjsPartyProvider] Received custom message:', msg);
+            console.log('[YjsPartyProvider] Parsed custom message:', msg);
             this.emit('custom', msg);
           } catch (e) {
-            console.error('[YjsPartyProvider] Failed to parse custom message:', e);
+            console.error('[YjsPartyProvider] Failed to parse custom message:', e, 'Data:', customData);
           }
           break;
       }
@@ -141,8 +127,13 @@ export class YjsPartyProvider {
       this.emit('status', { status: 'disconnected' });
       this.synced = false;
 
-      // Reconnect after delay
-      setTimeout(() => this.connect(), 1000);
+      // Only reconnect if not explicitly destroyed
+      if (!this.destroyed) {
+        console.log('[YjsPartyProvider] Auto-reconnecting in 1s...');
+        setTimeout(() => this.connect(), 1000);
+      } else {
+        console.log('[YjsPartyProvider] Provider destroyed, not reconnecting');
+      }
     };
 
     this.ws.onerror = (error) => {
@@ -176,7 +167,45 @@ export class YjsPartyProvider {
   }
 
   destroy() {
+    console.log('[YjsPartyProvider] Destroying provider');
+    this.destroyed = true;  // Mark as destroyed to prevent reconnection
     this.ws?.close();
     this.awareness.destroy();
+  }
+
+  // Manual awareness control - client decides when to send
+  sendAwarenessUpdate(state: any) {
+    console.log('[YjsPartyProvider] Manual awareness update:', state);
+    
+    // Set local state (for local tracking)
+    this.awareness.setLocalState(state);
+    
+    // Send as simple JSON (not y-protocols encoding)
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
+      encoding.writeVarString(encoder, JSON.stringify(state));
+      this.ws.send(encoding.toUint8Array(encoder));
+      console.log('[YjsPartyProvider] Sent custom awareness update');
+    } else {
+      console.warn('[YjsPartyProvider] Cannot send awareness - not connected');
+    }
+  }
+
+  // Clear awareness and notify server
+  clearAwareness() {
+    console.log('[YjsPartyProvider] Clearing awareness');
+    
+    // Clear local state
+    this.awareness.setLocalState(null);
+    
+    // Send null as JSON
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
+      encoding.writeVarString(encoder, JSON.stringify(null));
+      this.ws.send(encoding.toUint8Array(encoder));
+      console.log('[YjsPartyProvider] Sent awareness removal');
+    }
   }
 }
